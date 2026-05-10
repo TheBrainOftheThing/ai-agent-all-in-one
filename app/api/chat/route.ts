@@ -3,12 +3,13 @@ import { openai, createOpenAI } from '@ai-sdk/openai';
 import { anthropic } from '@ai-sdk/anthropic';
 import { deepseek } from '@ai-sdk/deepseek';
 import { mistral } from '@ai-sdk/mistral';
-import { streamText, tool } from 'ai';
+import { streamText, tool, embed } from 'ai';
 import { z } from 'zod';
+import { ComposioToolSet } from "composio-core";
+import { supabase } from '@/lib/supabase';
 
 export const maxDuration = 30;
 
-// Kimi (Moonshot) is OpenAI-compatible
 const kimi = createOpenAI({
   baseURL: 'https://api.moonshot.cn/v1',
   apiKey: process.env.KIMI_API_KEY,
@@ -27,6 +28,8 @@ You are a pragmatic, hands-on software assistant (The CTO Engineer).
 ## Capabilities
 - You have access to web search and browsing tools.
 - You can browse the internet to find current information.
+- You have "Hands" via Composio to interact with external tools (Slack, GitHub, Gmail, Discord, Notion).
+- You have Long-term Memory via a Supabase Vector Store. You can save and retrieve information.
 
 ## Boundaries
 - Keep private data private.
@@ -35,6 +38,22 @@ You are a pragmatic, hands-on software assistant (The CTO Engineer).
 
 export async function POST(req: Request) {
   const { messages, modelId } = await req.json();
+
+  const toolset = new ComposioToolSet({
+    apiKey: process.env.COMPOSIO_API_KEY,
+  });
+
+  // Pick the most important tools
+  const composioTools = await toolset.getActions({ 
+    actions: [
+      'github_issues_create', 
+      'slack_chat_post_message', 
+      'gmail_send_email', 
+      'discord_send_message', 
+      'notion_pages_create',
+      'google_calendar_create_event'
+    ] 
+  });
 
   let model;
   switch (modelId) {
@@ -65,14 +84,13 @@ export async function POST(req: Request) {
     system: systemPrompt,
     messages,
     tools: {
+      ...composioTools,
       search: tool({
         description: 'Search the web for information',
         parameters: z.object({
           query: z.string().describe('The search query'),
         }),
         execute: async ({ query }) => {
-          // This uses a simple search API or the Tavily/Serper integration if keys provided
-          // For now, we point to a generic search fetch
           const res = await fetch(`https://api.tavily.com/search`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -90,6 +108,47 @@ export async function POST(req: Request) {
           const res = await fetch(`https://r.jina.ai/${url}`);
           const content = await res.text();
           return { content };
+        },
+      }),
+      remember: tool({
+        description: 'Save information to long-term memory (vector store)',
+        parameters: z.object({
+          text: z.string().describe('The information to remember'),
+        }),
+        execute: async ({ text }) => {
+          const { embedding } = await embed({
+            model: openai.embedding('text-embedding-3-small'),
+            value: text,
+          });
+
+          const { error } = await supabase.from('documents').insert({
+            content: text,
+            embedding,
+          });
+
+          if (error) return { error: error.message };
+          return { success: true };
+        },
+      }),
+      recall: tool({
+        description: 'Search long-term memory for relevant information',
+        parameters: z.object({
+          query: z.string().describe('The search query for memory'),
+        }),
+        execute: async ({ query }) => {
+          const { embedding } = await embed({
+            model: openai.embedding('text-embedding-3-small'),
+            value: query,
+          });
+
+          const { data, error } = await supabase.rpc('match_documents', {
+            query_embedding: embedding,
+            match_threshold: 0.5,
+            match_count: 5,
+          });
+
+          if (error) return { error: error.message };
+          return { matches: data };
         },
       }),
     },

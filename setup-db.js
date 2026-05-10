@@ -7,12 +7,12 @@ const supabase = createClient(supabaseUrl, supabaseKey);
 async function setup() {
   console.log('Setting up Supabase tables...');
   
-  // We can't create tables directly via JS client without SQL access
-  // But we can try to insert into them to see if they exist
-  // Usually the user does this via SQL Editor
-  
   console.log('Please run this SQL in your Supabase SQL Editor:');
   console.log(`
+    -- 1. Enable pgvector
+    CREATE EXTENSION IF NOT EXISTS vector;
+
+    -- 2. Create Messages Table
     CREATE TABLE IF NOT EXISTS messages (
       id BIGSERIAL PRIMARY KEY,
       created_at TIMESTAMPTZ DEFAULT NOW(),
@@ -21,6 +21,37 @@ async function setup() {
       model_id TEXT
     );
 
+    -- 3. Create Documents Table for Vector Memory
+    CREATE TABLE IF NOT EXISTS documents (
+      id BIGSERIAL PRIMARY KEY,
+      content TEXT,
+      embedding VECTOR(1536)
+    );
+
+    -- 4. Create Match Function for Search
+    CREATE OR REPLACE FUNCTION match_documents (
+      query_embedding VECTOR(1536),
+      match_threshold FLOAT,
+      match_count INT
+    ) RETURNS TABLE (
+      id BIGINT,
+      content TEXT,
+      similarity FLOAT
+    ) LANGUAGE plpgsql AS $$
+    BEGIN
+      RETURN QUERY
+      SELECT
+        documents.id,
+        documents.content,
+        1 - (documents.embedding <=> query_embedding) AS similarity
+      FROM documents
+      WHERE 1 - (documents.embedding <=> query_embedding) > match_threshold
+      ORDER BY documents.embedding <=> query_embedding
+      LIMIT match_count;
+    END;
+    $$;
+
+    -- 5. Create Status Table
     CREATE TABLE IF NOT EXISTS agent_status (
       id BIGSERIAL PRIMARY KEY,
       model_name TEXT UNIQUE,
